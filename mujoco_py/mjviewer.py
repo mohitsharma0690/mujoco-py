@@ -9,6 +9,7 @@ from mujoco_py.utils import rec_copy, rec_assign
 import numpy as np
 import imageio
 
+import cv2
 
 class MjViewerBasic(cymj.MjRenderContextWindow):
     """
@@ -41,7 +42,7 @@ class MjViewerBasic(cymj.MjRenderContextWindow):
         glfw.set_scroll_callback(self.window, self._scroll_callback)
         glfw.set_key_callback(self.window, self.key_callback)
 
-    def render(self):
+    def render(self, context=None):
         """
         Render the current simulation state to the screen or off-screen buffer.
         Call this in your main loop.
@@ -161,11 +162,25 @@ class MjViewer(MjViewerBasic):
         self._hide_overlay = False  # hide the entire overlay.
         self._user_overlay = {}
 
-    def render(self):
+        self.directed_gail_context_list = Queue()
+
+        self.dgail_video_queue = []
+        self.dgail_context_queue = []
+
+        # Pressing TAB does these things
+        self.cam.fixedcamid += 1
+        self.cam.type = const.CAMERA_FIXED
+        if self.cam.fixedcamid >= self._ncam:
+            self.cam.fixedcamid = -1
+            self.cam.type = const.CAMERA_FREE
+        
+
+    def render(self, context=None):
         """
         Render the current simulation state to the screen or off-screen buffer.
         Call this in your main loop.
         """
+        print("render called with: {}".format(context))
 
         def render_inner_loop(self):
             render_start = time.time()
@@ -178,7 +193,13 @@ class MjViewer(MjViewerBasic):
             super().render()
             if self._record_video:
                 frame = self._read_pixels_as_in_window()
+                self.dgail_video_queue.append(np.copy(frame))
                 self._video_queue.put(frame)
+                print("render_inner_loop called with: {}".format(context))
+                if context is not None:
+                    self.directed_gail_context_list.put(context)
+                else:
+                    self.directed_gail_context_list.put(-1)
             else:
                 self._time_per_render = 0.9 * self._time_per_render + \
                     0.1 * (time.time() - render_start)
@@ -316,10 +337,13 @@ class MjViewer(MjViewerBasic):
             if self._record_video:
                 fps = (1 / self._time_per_render)
                 self._video_process = Process(target=save_video,
-                                  args=(self._video_queue, self._video_path % self._video_idx, fps))
+                                  args=(self._video_queue, 
+                                        self.directed_gail_context_list,
+                                        self._video_path % self._video_idx, fps))
                 self._video_process.start()
             if not self._record_video:
                 self._video_queue.put(None)
+                self.directed_gail_context_list.put(None)
                 self._video_process.join()
                 self._video_idx += 1
         elif key == glfw.KEY_T:  # capture screenshot
@@ -370,11 +394,28 @@ class MjViewer(MjViewerBasic):
 # less slowed down.
 
 
-def save_video(queue, filename, fps):
+def save_video(queue, context_queue, filename, fps):
     writer = imageio.get_writer(filename, fps=fps)
     while True:
-        frame = queue.get()
+        try:
+            frame = queue.get(True, 1.0)
+        except:
+            frame = None
         if frame is None:
             break
+        try:
+            c = context_queue.get(True, 1.0)
+        except:
+            c = -1
+
+        print("Context: {}, Size: {}".format(c, type(queue)))
+        if c >= 0:
+            cv2.putText(frame, 
+                        "Context: {}".format(c),
+                        (600, 400),
+                        cv2.FONT_HERSHEY_DUPLEX,
+                        2.0,
+                        (255.0, 255.0, 255.0),
+                        3)
         writer.append_data(frame)
     writer.close()
